@@ -1481,6 +1481,90 @@ def get_usb_free_space():
     return NA
 
 
+
+def get_usb_smart_sat_full():
+    device = get_usb_device_path()
+    if device == NA:
+        return NA
+    return run_command_first([
+        ["smartctl", "-a", "-d", "sat", device],
+        ["sudo", "-n", "smartctl", "-a", "-d", "sat", device],
+    ], timeout=6)
+
+
+def parse_smart_attribute_raw(smart, attribute_ids, attribute_names):
+    if smart == NA:
+        return None
+
+    normalized_names = [name.lower() for name in attribute_names]
+    for line in smart.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        parts = stripped.split()
+        if not parts:
+            continue
+
+        attr_id = parts[0] if parts[0].isdigit() else ""
+        attr_name = parts[1].lower() if len(parts) > 1 else ""
+        if attr_id not in attribute_ids and attr_name not in normalized_names:
+            continue
+
+        for token in reversed(parts):
+            match = re.search(r"([-+]?\d+(?:\.\d+)?)", token)
+            if match:
+                try:
+                    return float(match.group(1))
+                except Exception:
+                    return None
+
+    return None
+
+
+def get_usb_drive_temp():
+    # USB SATA bridges often need forced SAT passthrough. Auto/scsi can guess wrong
+    # or report bogus 0 C values, so only accept realistic SAT SMART temps.
+    smart = get_usb_smart_sat_full()
+    value = parse_smart_attribute_raw(
+        smart,
+        ["190", "194"],
+        ["Temperature_Celsius", "Airflow_Temperature_Cel", "Temperature_Internal"],
+    )
+    if value is None or value <= 0 or value > 120:
+        return NA
+    return format_temp(value)
+
+
+def get_usb_drive_health():
+    smart = get_usb_smart_sat_full()
+    value = smart_line_value(smart, ["SMART overall-health self-assessment test result", "SMART Health Status"])
+    if value == NA:
+        return NA
+    return value.replace("PASSED", "Passed")
+
+
+def get_usb_serial():
+    smart = get_usb_smart_sat_full()
+    value = smart_line_value(smart, ["Serial Number"])
+    return shorten(value, 34) if value != NA else NA
+
+
+def get_usb_firmware():
+    smart = get_usb_smart_sat_full()
+    value = smart_line_value(smart, ["Firmware Version", "Revision"])
+    return shorten(value, 34) if value != NA else NA
+
+
+def get_usb_sata_link():
+    smart = get_usb_smart_sat_full()
+    if smart == NA:
+        return NA
+    for line in smart.splitlines():
+        if line.strip().startswith("SATA Version is:"):
+            return shorten(line.split(":", 1)[1].strip(), 44)
+    return NA
+
 def get_network_ip():
     output = run_command(["hostname", "-I"])
     if output == NA or not output:
@@ -1538,6 +1622,7 @@ TEMP_THRESHOLDS = {
     "CPU Temp": {"cool": 45.0, "warm": 65.0, "hot": 80.0},
     "I/O Temp": {"cool": 40.0, "warm": 60.0, "hot": 75.0},
     "Power Chip Temp": {"cool": 45.0, "warm": 65.0, "hot": 80.0},
+    "USB Drive Temp": {"cool": 40.0, "warm": 55.0, "hot": 70.0},
     "SMART Temp": {"cool": 40.0, "warm": 55.0, "hot": 70.0},
 }
 
@@ -1650,7 +1735,7 @@ class Section(Gtk.Frame):
 
 class PiHardwareMonitor(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Pi 4 OS Hardware Monitor v1.0")
+        super().__init__(title="Pi 4 OS Hardware Monitor v1.1")
         try:
             Gtk.Window.set_default_icon_name(APP_ICON_NAME)
             Gtk.Window.set_default_icon_from_file(APP_ICON_PATH)
@@ -1674,7 +1759,7 @@ class PiHardwareMonitor(Gtk.Window):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         header = Gtk.Label()
-        header.set_text("Pi 4 OS Hardware Monitor v1.0 5/6/2026")
+        header.set_text("Pi 4 OS Hardware Monitor v1.1 5/6/2026")
         apply_label_style(header, scale=1.35, bold=True)
         header.set_halign(Gtk.Align.START)
         subtitle = Gtk.Label(label="Raspberry Pi 4 desktop hardware monitor. No background service. Only the active tab refreshes.")
@@ -1734,7 +1819,8 @@ class PiHardwareMonitor(Gtk.Window):
             ]),
         ], [
             ("External USB Storage", "External USB storage when detected", [
-                "Model", "Capacity", "Free Space", "Device Path", "Mounted At",
+                "Model", "Capacity", "USB Drive Temp", "Drive Health", "Serial", "Firmware", "SATA Link",
+                "Free Space", "Device Path", "Mounted At",
             ]),
         ]])
 
@@ -1837,7 +1923,7 @@ class PiHardwareMonitor(Gtk.Window):
         return False
 
     def get_thermal_rows(self):
-        return ["CPU Temp", "Power Chip Temp", "SMART Temp", "Fan RPM", "Power Level"]
+        return ["CPU Temp", "Power Chip Temp", "USB Drive Temp", "Fan RPM", "Power Level"]
 
 
     def set_row(self, page_id, section, row, value):
@@ -1862,7 +1948,7 @@ class PiHardwareMonitor(Gtk.Window):
         page = "overview"
         self.set_row(page, "Thermal / Cooling", "CPU Temp", get_cpu_temp())
         self.set_row(page, "Thermal / Cooling", "Power Chip Temp", get_power_chip_temp())
-        self.set_row(page, "Thermal / Cooling", "SMART Temp", get_nvme_temp())
+        self.set_row(page, "Thermal / Cooling", "USB Drive Temp", get_usb_drive_temp())
         self.set_row(page, "Thermal / Cooling", "Fan RPM", get_fan_info())
         self.set_row(page, "Thermal / Cooling", "Power Level", get_power_level())
         self.set_row(page, "Power / Throttling", "Power Health", get_power_health())
@@ -1964,6 +2050,11 @@ class PiHardwareMonitor(Gtk.Window):
 
         self.set_row(page, "External USB Storage", "Model", get_usb_model())
         self.set_row(page, "External USB Storage", "Capacity", get_usb_capacity())
+        self.set_row(page, "External USB Storage", "USB Drive Temp", get_usb_drive_temp())
+        self.set_row(page, "External USB Storage", "Drive Health", get_usb_drive_health())
+        self.set_row(page, "External USB Storage", "Serial", get_usb_serial())
+        self.set_row(page, "External USB Storage", "Firmware", get_usb_firmware())
+        self.set_row(page, "External USB Storage", "SATA Link", get_usb_sata_link())
         self.set_row(page, "External USB Storage", "Free Space", get_usb_free_space())
         self.set_row(page, "External USB Storage", "Device Path", get_usb_device_path())
         self.set_row(page, "External USB Storage", "Mounted At", get_usb_mountpoint())
