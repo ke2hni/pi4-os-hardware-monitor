@@ -1794,7 +1794,7 @@ class PiHardwareMonitor(Gtk.Window):
             self.set_wmclass(APP_ID, APP_NAME)
         except Exception:
             pass
-        self.set_default_size(1240, 620)
+        self.set_default_size(1240, 680)
         self.set_resizable(True)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_border_width(2)
