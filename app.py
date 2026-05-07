@@ -689,6 +689,121 @@ def get_root_device():
     return output if output else NA
 
 
+def get_root_disk_device():
+    root = get_root_device()
+    if root == NA or not root.startswith("/dev/"):
+        return NA
+
+    pkname = run_command(["lsblk", "-no", "PKNAME", root], timeout=2)
+    if pkname != NA and pkname:
+        return f"/dev/{pkname.splitlines()[0].strip()}"
+
+    base = os.path.basename(root)
+    if re.match(r"nvme\d+n\d+p\d+$", base):
+        return "/dev/" + re.sub(r"p\d+$", "", base)
+    if re.match(r"mmcblk\d+p\d+$", base):
+        return "/dev/" + re.sub(r"p\d+$", "", base)
+    if re.match(r"sd[a-z]\d+$", base):
+        return "/dev/" + re.sub(r"\d+$", "", base)
+
+    return root
+
+
+def get_cpu_scaling_governor():
+    value = read_file("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+    return value if value != NA else NA
+
+
+def get_cpu_scaling_frequency():
+    value = read_file("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")
+    try:
+        khz = int(value)
+    except Exception:
+        return NA
+
+    hz = khz * 1000
+    return format_clock(hz)
+
+
+def get_root_udev_properties():
+    disk = get_root_disk_device()
+    if disk == NA:
+        return {}
+
+    output = run_command(["udevadm", "info", "--query=property", f"--name={disk}"], timeout=3)
+    if output == NA:
+        return {}
+
+    props = {}
+    for line in output.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        props[key.strip()] = value.strip()
+
+    return props
+
+
+def get_root_smart_full():
+    disk = get_root_disk_device()
+    if disk == NA:
+        return NA
+
+    if "/dev/nvme" in disk:
+        return run_command_first([
+            ["smartctl", "-a", disk],
+            ["sudo", "-n", "smartctl", "-a", disk],
+        ], timeout=6)
+
+    if "/dev/sd" in disk:
+        return run_command_first([
+            ["smartctl", "-a", "-d", "sat", disk],
+            ["sudo", "-n", "smartctl", "-a", "-d", "sat", disk],
+        ], timeout=6)
+
+    return run_command_first([
+        ["smartctl", "-a", disk],
+        ["sudo", "-n", "smartctl", "-a", disk],
+    ], timeout=6)
+
+
+def get_root_drive_manufacturer():
+    props = get_root_udev_properties()
+    for key in ["ID_VENDOR_FROM_DATABASE", "ID_VENDOR", "ID_USB_VENDOR", "ID_USB_VENDOR_FROM_DATABASE"]:
+        value = props.get(key)
+        if value:
+            return shorten(value.replace("_", " "), 34)
+
+    smart = get_root_smart_full()
+    value = smart_line_value(smart, ["Vendor", "Model Family"])
+    return shorten(value, 34) if value != NA else NA
+
+
+def get_root_drive_model():
+    props = get_root_udev_properties()
+    for key in ["ID_MODEL_FROM_DATABASE", "ID_MODEL", "ID_USB_MODEL"]:
+        value = props.get(key)
+        if value:
+            return shorten(value.replace("_", " "), 34)
+
+    smart = get_root_smart_full()
+    value = smart_line_value(smart, ["Device Model", "Model Number", "Product"])
+    return shorten(value, 34) if value != NA else NA
+
+
+def get_root_drive_smart_health():
+    smart = get_root_smart_full()
+    value = smart_line_value(smart, ["SMART overall-health self-assessment test result", "SMART Health Status"])
+    if value != NA:
+        return value.replace("PASSED", "Passed")
+
+    critical = smart_line_value(smart, ["Critical Warning"])
+    if critical != NA:
+        return "Healthy" if critical.strip() in ["0", "0x00"] else f"Warning: {critical}"
+
+    return NA
+
+
 def get_boot_device():
     root = get_root_device()
     if "nvme" in root:
@@ -1711,7 +1826,7 @@ class Section(Gtk.Frame):
 
 class PiHardwareMonitor(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Pi 4 OS Hardware Monitor v1.9")
+        super().__init__(title="Pi 4 OS Hardware Monitor v2.0")
         try:
             Gtk.Window.set_default_icon_name(APP_ICON_NAME)
             Gtk.Window.set_default_icon_from_file(APP_ICON_PATH)
@@ -1735,7 +1850,7 @@ class PiHardwareMonitor(Gtk.Window):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         header = Gtk.Label()
-        header.set_text("Pi 4 OS Hardware Monitor v1.9 5/6/2026")
+        header.set_text("Pi 4 OS Hardware Monitor v2.0 5/7/2026")
         apply_label_style(header, scale=1.35, bold=True)
         header.set_halign(Gtk.Align.START)
         subtitle = Gtk.Label(label="Raspberry Pi 4 desktop hardware monitor. No background service. Only the active tab refreshes.")
@@ -1790,7 +1905,8 @@ class PiHardwareMonitor(Gtk.Window):
 
         self.add_page("storage", "Storage", [[
             ("Boot / Device Info", "Root device, storage type, and hardware presence", [
-                "Boot Device", "Root Device", "NVMe Present", "Fan Present", "Bootloader Version", "Storage Devices",
+                "Boot Device", "Root Device", "Root Drive Manufacturer", "Root Drive Model",
+                "Root Drive SMART Health", "NVMe Present", "Fan Present", "Bootloader Version", "Storage Devices",
             ]),
             ("SD Card", "SD card presence and basic identity", [
                 "Present", "Device", "Capacity", "Card Used", "Vendor", "Model", "Serial", "Mounted At",
@@ -1824,7 +1940,7 @@ class PiHardwareMonitor(Gtk.Window):
             ]),
         ], [
             ("Performance", "CPU, memory, load, and process count", [
-                "CPU Usage", "CPU Clock", "Core Clock", "Core Voltage",
+                "CPU Usage", "CPU Clock", "CPU Scaling Freq", "CPU Governor", "Core Clock", "Core Voltage",
                 "Memory", "Swap", "Load Avg (1m/5m/15m)", "Processes",
             ]),
             ("Network", "Current network identity", [
@@ -2029,6 +2145,9 @@ class PiHardwareMonitor(Gtk.Window):
         page = "storage"
         self.set_row(page, "Boot / Device Info", "Boot Device", get_boot_device())
         self.set_row(page, "Boot / Device Info", "Root Device", get_root_device())
+        self.set_row(page, "Boot / Device Info", "Root Drive Manufacturer", get_root_drive_manufacturer())
+        self.set_row(page, "Boot / Device Info", "Root Drive Model", get_root_drive_model())
+        self.set_row(page, "Boot / Device Info", "Root Drive SMART Health", get_root_drive_smart_health())
         self.set_row(page, "Boot / Device Info", "NVMe Present", get_nvme_drive_present())
         self.set_row(page, "Boot / Device Info", "Fan Present", get_fan_present())
         self.set_row(page, "Boot / Device Info", "Bootloader Version", get_bootloader_version())
@@ -2112,6 +2231,8 @@ class PiHardwareMonitor(Gtk.Window):
 
         self.set_row(page, "Performance", "CPU Usage", get_cpu_usage())
         self.set_row(page, "Performance", "CPU Clock", get_clock("arm"))
+        self.set_row(page, "Performance", "CPU Scaling Freq", get_cpu_scaling_frequency())
+        self.set_row(page, "Performance", "CPU Governor", get_cpu_scaling_governor())
         self.set_row(page, "Performance", "Core Clock", get_clock("core"))
         self.set_row(page, "Performance", "Core Voltage", get_voltage("core"))
         self.set_row(page, "Performance", "Memory", get_memory_usage())
