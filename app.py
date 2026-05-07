@@ -571,14 +571,60 @@ def get_fan_info():
     return f"{rpm} RPM"
 
 
+def gpio_fan_configured():
+    # A Raspberry Pi 4 GPIO fan can be physically present/configured without
+    # providing RPM telemetry. Detect that separately from fan*_input/pwm data.
+    # This intentionally does not invent RPM/PWM values.
+    try:
+        for name_path in glob.glob("/sys/class/hwmon/hwmon*/name"):
+            name = read_file(name_path).strip().lower()
+            if name in ["gpio_fan", "gpio-fan"]:
+                return True
+    except Exception:
+        pass
+
+    try:
+        for base in ["/proc/device-tree", "/sys/firmware/devicetree/base"]:
+            for path in glob.glob(os.path.join(base, "**", "compatible"), recursive=True):
+                data = read_binary(path)
+                if not data:
+                    continue
+                text = data.replace(b"\x00", b" ").decode("utf-8", errors="ignore").lower()
+                if "gpio-fan" in text or "gpio_fan" in text:
+                    return True
+    except Exception:
+        pass
+
+    try:
+        for config_path in [
+            "/boot/firmware/config.txt",
+            "/boot/config.txt",
+            "/boot/firmware/usercfg.txt",
+            "/boot/usercfg.txt",
+        ]:
+            config = read_file(config_path)
+            if config == NA:
+                continue
+            for line in config.splitlines():
+                line = line.strip().lower()
+                if not line or line.startswith("#"):
+                    continue
+                if "dtoverlay=gpio-fan" in line or "gpio_fan" in line:
+                    return True
+    except Exception:
+        pass
+
+    return False
+
+
 def get_fan_present():
-    return "Yes" if fan_sensor_present() else "No"
+    return "Yes" if fan_sensor_present() or gpio_fan_configured() else "No"
 
 
 def fan_telemetry_should_display():
-    # Match the Pi 4 Cockpit UI behavior: do not show a fan telemetry card
-    # when Linux reports no useful RPM/PWM value. A readable 0 PWM step by
-    # itself is fan-control support, not proof of a physical fan spinning.
+    # Match the Pi 4 Cockpit UI behavior: only show fan telemetry rows when
+    # Linux exposes a useful fan RPM or PWM value. Physical/configured fan
+    # presence is reported separately as Fan Present.
     rpm = get_fan_rpm_value()
     pwm = get_fan_pwm_value()
 
@@ -587,10 +633,6 @@ def fan_telemetry_should_display():
     if pwm is not None and pwm != 0:
         return True
     return False
-
-
-def get_fan_telemetry_available():
-    return "Yes" if fan_telemetry_should_display() else "No"
 
 def get_throttled_raw():
     output = run_command(["vcgencmd", "get_throttled"])
@@ -1743,7 +1785,7 @@ class Section(Gtk.Frame):
 
 class PiHardwareMonitor(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Pi 4 OS Hardware Monitor v1.6")
+        super().__init__(title="Pi 4 OS Hardware Monitor v1.7")
         try:
             Gtk.Window.set_default_icon_name(APP_ICON_NAME)
             Gtk.Window.set_default_icon_from_file(APP_ICON_PATH)
@@ -1767,7 +1809,7 @@ class PiHardwareMonitor(Gtk.Window):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         header = Gtk.Label()
-        header.set_text("Pi 4 OS Hardware Monitor v1.6 5/6/2026")
+        header.set_text("Pi 4 OS Hardware Monitor v1.7 5/6/2026")
         apply_label_style(header, scale=1.35, bold=True)
         header.set_halign(Gtk.Align.START)
         subtitle = Gtk.Label(label="Raspberry Pi 4 desktop hardware monitor. No background service. Only the active tab refreshes.")
@@ -1822,7 +1864,7 @@ class PiHardwareMonitor(Gtk.Window):
 
         self.add_page("storage", "Storage", [[
             ("Boot / Device Info", "Root device, storage type, and hardware presence", [
-                "Boot Device", "Root Device", "NVMe Present", "Fan Telemetry", "Bootloader Version", "Storage Devices",
+                "Boot Device", "Root Device", "NVMe Present", "Fan Present", "Bootloader Version", "Storage Devices",
             ]),
             ("SD Card", "SD card presence and basic identity", [
                 "Present", "Device", "Capacity", "Card Used", "Vendor", "Model", "Serial", "Mounted At",
@@ -2062,7 +2104,7 @@ class PiHardwareMonitor(Gtk.Window):
         self.set_row(page, "Boot / Device Info", "Boot Device", get_boot_device())
         self.set_row(page, "Boot / Device Info", "Root Device", get_root_device())
         self.set_row(page, "Boot / Device Info", "NVMe Present", get_nvme_drive_present())
-        self.set_row(page, "Boot / Device Info", "Fan Telemetry", get_fan_telemetry_available())
+        self.set_row(page, "Boot / Device Info", "Fan Present", get_fan_present())
         self.set_row(page, "Boot / Device Info", "Bootloader Version", get_bootloader_version())
         self.set_row(page, "Boot / Device Info", "Storage Devices", get_storage_summary())
 
