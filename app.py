@@ -768,15 +768,26 @@ def get_root_smart_full():
 
 
 def get_root_drive_manufacturer():
+    # Prefer drive-side SMART identity. For USB/SATA boot drives, udev USB
+    # vendor fields usually describe the enclosure/bridge, not the SSD/HDD.
+    smart = get_root_smart_full()
+
+    value = smart_line_value(smart, ["Model Family", "Vendor"])
+    if value != NA:
+        return shorten(value, 34)
+
+    model = smart_line_value(smart, ["Device Model", "Model Number", "Product"])
+    if model != NA:
+        first_word = model.strip().split()[0] if model.strip() else ""
+        return shorten(first_word, 34) if first_word else NA
+
     props = get_root_udev_properties()
-    for key in ["ID_VENDOR_FROM_DATABASE", "ID_VENDOR", "ID_USB_VENDOR", "ID_USB_VENDOR_FROM_DATABASE"]:
+    for key in ["ID_ATA_VENDOR", "ID_VENDOR_FROM_DATABASE", "ID_VENDOR"]:
         value = props.get(key)
         if value:
             return shorten(value.replace("_", " "), 34)
 
-    smart = get_root_smart_full()
-    value = smart_line_value(smart, ["Vendor", "Model Family"])
-    return shorten(value, 34) if value != NA else NA
+    return NA
 
 
 def get_root_drive_model():
@@ -1826,7 +1837,7 @@ class Section(Gtk.Frame):
 
 class PiHardwareMonitor(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Pi 4 OS Hardware Monitor v2.0")
+        super().__init__(title="Pi 4 OS Hardware Monitor v2.1")
         try:
             Gtk.Window.set_default_icon_name(APP_ICON_NAME)
             Gtk.Window.set_default_icon_from_file(APP_ICON_PATH)
@@ -1835,7 +1846,7 @@ class PiHardwareMonitor(Gtk.Window):
             self.set_wmclass(APP_ID, APP_NAME)
         except Exception:
             pass
-        self.set_default_size(1240, 675)
+        self.set_default_size(1240, 725)
         self.set_resizable(True)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_border_width(2)
@@ -1850,7 +1861,7 @@ class PiHardwareMonitor(Gtk.Window):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         header = Gtk.Label()
-        header.set_text("Pi 4 OS Hardware Monitor v2.0 5/7/2026")
+        header.set_text("Pi 4 OS Hardware Monitor v2.1 5/7/2026")
         apply_label_style(header, scale=1.35, bold=True)
         header.set_halign(Gtk.Align.START)
         subtitle = Gtk.Label(label="Raspberry Pi 4 desktop hardware monitor. No background service. Only the active tab refreshes.")
