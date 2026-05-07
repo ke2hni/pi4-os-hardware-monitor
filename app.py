@@ -555,8 +555,36 @@ def get_fan_info():
     return f"{rpm} RPM"
 
 
+def fan_telemetry_available():
+    return get_fan_rpm_value() is not None or get_power_level() != NA
+
+
+def fan_overlay_configured():
+    config_paths = [
+        "/boot/firmware/config.txt",
+        "/boot/config.txt",
+        "/boot/firmware/usercfg.txt",
+        "/boot/usercfg.txt",
+    ]
+    for path in config_paths:
+        text = read_file(path)
+        if text == NA:
+            continue
+        for line in text.splitlines():
+            cleaned = line.strip().lower()
+            if not cleaned or cleaned.startswith("#"):
+                continue
+            if "gpio-fan" in cleaned or "rpi-poe" in cleaned or "pwm-fan" in cleaned:
+                return True
+    return False
+
+
 def get_fan_present():
-    return "Yes" if get_fan_rpm_value() is not None else "No"
+    if fan_telemetry_available():
+        return "Yes"
+    if fan_overlay_configured():
+        return "Configured / No RPM Sensor"
+    return "Not Sensor-Reported"
 
 def get_throttled_raw():
     output = run_command(["vcgencmd", "get_throttled"])
@@ -1447,38 +1475,74 @@ def get_usb_device_path():
     return "/dev/" + lines[0].split()[0]
 
 
+def get_usb_mounts():
+    device = get_usb_device_path()
+    if device == NA:
+        return []
+
+    disk_name = os.path.basename(device)
+    output = run_command(["findmnt", "-rn", "-o", "SOURCE,TARGET,FSTYPE,SIZE,USED,AVAIL,USE%"], timeout=3)
+    if output == NA:
+        return []
+
+    mounts = []
+    for line in output.splitlines():
+        parts = line.split(None, 6)
+        if len(parts) < 7:
+            continue
+
+        source, target, fstype, size, used, avail, use_percent = parts
+        source_base = os.path.basename(source)
+        if source_base != disk_name and not source_base.startswith(disk_name):
+            continue
+
+        mounts.append({
+            "source": source,
+            "target": unescape_lsblk_path(target),
+            "fstype": fstype,
+            "size": size,
+            "used": used,
+            "avail": avail,
+            "use_percent": use_percent,
+        })
+
+    return mounts
+
+
+def get_preferred_usb_mount():
+    mounts = get_usb_mounts()
+    if not mounts:
+        return None
+
+    for mount in mounts:
+        if mount["target"] == "/":
+            return mount
+
+    for mount in mounts:
+        if mount["fstype"].lower() not in ["vfat", "fat", "fat32"]:
+            return mount
+
+    return mounts[0]
+
+
 def get_usb_mountpoint():
     device = get_usb_device_path()
     if device == NA:
         return NA
-    output = run_command(["lsblk", "-nr", "-o", "NAME,MOUNTPOINT", device])
-    for line in output.splitlines():
-        parts = line.split(None, 1)
-        if len(parts) == 2 and parts[1].startswith("/"):
-            return unescape_lsblk_path(parts[1])
-    return "Not Mounted"
+
+    mounts = get_usb_mounts()
+    if not mounts:
+        return "Not Mounted"
+
+    root_first = sorted(mounts, key=lambda item: 0 if item["target"] == "/" else 1)
+    return ", ".join(mount["target"] for mount in root_first)
 
 
 def get_usb_free_space():
-    mount = get_usb_mountpoint()
-    if mount in [NA, "Not Mounted"]:
-        return mount
-
-    output = run_command(["df", "-h", mount])
-    if output == NA:
-        return NA
-
-    try:
-        lines = output.splitlines()
-        if len(lines) < 2:
-            return NA
-        parts = lines[1].split()
-        if len(parts) >= 4:
-            return parts[3]
-    except Exception:
-        pass
-
-    return NA
+    mount = get_preferred_usb_mount()
+    if not mount:
+        return "Not Mounted" if get_usb_device_path() != NA else NA
+    return mount["avail"]
 
 
 
@@ -1735,7 +1799,7 @@ class Section(Gtk.Frame):
 
 class PiHardwareMonitor(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Pi 4 OS Hardware Monitor v1.1")
+        super().__init__(title="Pi 4 OS Hardware Monitor v1.2")
         try:
             Gtk.Window.set_default_icon_name(APP_ICON_NAME)
             Gtk.Window.set_default_icon_from_file(APP_ICON_PATH)
@@ -1759,7 +1823,7 @@ class PiHardwareMonitor(Gtk.Window):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         header = Gtk.Label()
-        header.set_text("Pi 4 OS Hardware Monitor v1.1 5/6/2026")
+        header.set_text("Pi 4 OS Hardware Monitor v1.2 5/6/2026")
         apply_label_style(header, scale=1.35, bold=True)
         header.set_halign(Gtk.Align.START)
         subtitle = Gtk.Label(label="Raspberry Pi 4 desktop hardware monitor. No background service. Only the active tab refreshes.")
@@ -1778,7 +1842,7 @@ class PiHardwareMonitor(Gtk.Window):
         self.notebook.connect("switch-page", self.on_tab_switched)
 
         self.add_page("overview", "Overview", [[
-            ("Thermal / Cooling", "Core temperature and fan telemetry", self.get_thermal_rows()),
+            ("Thermal / Cooling", "Core temperature and drive temperature", self.get_thermal_rows()),
             ("Power / Throttling", "Power, throttling, frequency cap, and temperature-limit status", [
                 "Power Health", "Current Undervoltage", "Undervoltage Since Boot",
                 "Current Throttled", "Throttled Since Boot", "Current Freq Cap",
@@ -1806,7 +1870,7 @@ class PiHardwareMonitor(Gtk.Window):
                 "ARM Clock", "Core Clock", "eMMC Clock",
             ]),
             ("Advanced Power", "Extra Pi-specific power diagnostics", [
-                "Power Chip Temp", "Power Level", "Core Rail Power", "Ring Oscillator", "Raw Status",
+                "Power Chip Temp", "Core Rail Power", "Ring Oscillator", "Raw Status",
             ]),
         ]])
 
@@ -1923,7 +1987,7 @@ class PiHardwareMonitor(Gtk.Window):
         return False
 
     def get_thermal_rows(self):
-        return ["CPU Temp", "Power Chip Temp", "USB Drive Temp", "Fan RPM", "Power Level"]
+        return ["CPU Temp", "Power Chip Temp", "USB Drive Temp"]
 
 
     def set_row(self, page_id, section, row, value):
@@ -1949,8 +2013,6 @@ class PiHardwareMonitor(Gtk.Window):
         self.set_row(page, "Thermal / Cooling", "CPU Temp", get_cpu_temp())
         self.set_row(page, "Thermal / Cooling", "Power Chip Temp", get_power_chip_temp())
         self.set_row(page, "Thermal / Cooling", "USB Drive Temp", get_usb_drive_temp())
-        self.set_row(page, "Thermal / Cooling", "Fan RPM", get_fan_info())
-        self.set_row(page, "Thermal / Cooling", "Power Level", get_power_level())
         self.set_row(page, "Power / Throttling", "Power Health", get_power_health())
         self.set_row(page, "Power / Throttling", "Current Undervoltage", get_current_undervoltage())
         self.set_row(page, "Power / Throttling", "Undervoltage Since Boot", get_boot_undervoltage())
@@ -2026,7 +2088,6 @@ class PiHardwareMonitor(Gtk.Window):
         self.set_row(page, "Clocks", "eMMC Clock", get_clock("emmc"))
 
         self.set_row(page, "Advanced Power", "Power Chip Temp", get_power_chip_temp())
-        self.set_row(page, "Advanced Power", "Power Level", get_power_level())
         self.set_row(page, "Advanced Power", "Core Rail Power", get_core_rail_power())
         self.set_row(page, "Advanced Power", "Ring Oscillator", get_ring_oscillator())
         self.set_row(page, "Advanced Power", "Raw Status", self.get_throttled_raw_description())
