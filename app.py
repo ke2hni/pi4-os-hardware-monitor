@@ -482,11 +482,6 @@ def find_hwmon_temp_by_name(possible_names):
     return NA
 
 
-def get_io_temp():
-    # Raspberry Pi 4 does not expose the Pi 5 RP1 I/O temperature sensor.
-    return NA
-
-
 def get_power_chip_temp():
     output = run_command(["vcgencmd", "measure_temp", "pmic"], timeout=2)
     value = parse_first_float(output)
@@ -579,6 +574,24 @@ def get_fan_info():
 def get_fan_present():
     return "Yes" if fan_sensor_present() else "No"
 
+
+def fan_telemetry_should_display():
+    # Match the Pi 4 Cockpit UI behavior: do not show a fan telemetry card
+    # when Linux reports no useful RPM/PWM value. A readable 0 PWM step by
+    # itself is fan-control support, not proof of a physical fan spinning.
+    rpm = get_fan_rpm_value()
+    pwm = get_fan_pwm_value()
+
+    if rpm is not None and rpm != 0:
+        return True
+    if pwm is not None and pwm != 0:
+        return True
+    return False
+
+
+def get_fan_telemetry_available():
+    return "Yes" if fan_telemetry_should_display() else "No"
+
 def get_throttled_raw():
     output = run_command(["vcgencmd", "get_throttled"])
     if output == NA:
@@ -657,70 +670,6 @@ def get_current_soft_temp_limit():
 
 def get_boot_soft_temp_limit():
     return bit_status(1 << 3, 1 << 19)[1]
-
-
-def get_input_voltage():
-    output = run_command(["vcgencmd", "pmic_read_adc"], timeout=3)
-    if output == NA:
-        return output
-
-    for line in output.splitlines():
-        if "EXT5V_V" not in line:
-            continue
-
-        value = parse_vcgencmd_adc_value(line)
-        if value is not None:
-            return f"{value:.4f} V"
-
-    return NA
-
-
-def get_core_rail_power():
-    output = run_command(["vcgencmd", "pmic_read_adc"], timeout=3)
-    if output == NA:
-        return output
-
-    voltage = None
-    current = None
-
-    for line in output.splitlines():
-        if "VDD_CORE_V" in line:
-            voltage = parse_vcgencmd_adc_value(line)
-        elif "VDD_CORE_A" in line:
-            current = parse_vcgencmd_adc_value(line)
-
-    if voltage is None or current is None:
-        return NA
-
-    return f"{voltage * current:.2f} W"
-
-
-def get_negotiated_current_limit():
-    current = read_dt_uint32("/proc/device-tree/chosen/power/max_current")
-    if current is None:
-        return NA
-    return f"{current} mA"
-
-
-def get_usb_current_limit_mode():
-    high_limit = read_dt_bool("/proc/device-tree/chosen/power/usb_max_current_enable")
-    if high_limit is None:
-        output = run_command(["vcgencmd", "get_config", "usb_max_current_enable"])
-        if output != NA and "=" in output:
-            try:
-                high_limit = int(output.split("=", 1)[1].strip()) != 0
-            except Exception:
-                high_limit = None
-    if high_limit is None:
-        return NA
-    return "High" if high_limit else "Low"
-
-
-def get_usb_over_current_at_boot():
-    detected = read_dt_bool("/proc/device-tree/chosen/power/usb_over_current_detected")
-    if detected is None:
-        return NA
-    return yes_no(detected)
 
 
 def get_storage_summary():
@@ -1672,7 +1621,6 @@ TEMP_COLORS = {
 
 TEMP_THRESHOLDS = {
     "CPU Temp": {"cool": 45.0, "warm": 65.0, "hot": 80.0},
-    "I/O Temp": {"cool": 40.0, "warm": 60.0, "hot": 75.0},
     "Power Chip Temp": {"cool": 45.0, "warm": 65.0, "hot": 80.0},
     "USB Drive Temp": {"cool": 40.0, "warm": 55.0, "hot": 70.0},
     "SMART Temp": {"cool": 40.0, "warm": 55.0, "hot": 70.0},
@@ -1784,10 +1732,18 @@ class Section(Gtk.Frame):
         if row_name in self.rows:
             self.rows[row_name].set_value(value)
 
+    def set_row_visible(self, row_name, visible):
+        if row_name not in self.rows:
+            return
+        if visible:
+            self.rows[row_name].show_all()
+        else:
+            self.rows[row_name].hide()
+
 
 class PiHardwareMonitor(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Pi 4 OS Hardware Monitor v1.5")
+        super().__init__(title="Pi 4 OS Hardware Monitor v1.6")
         try:
             Gtk.Window.set_default_icon_name(APP_ICON_NAME)
             Gtk.Window.set_default_icon_from_file(APP_ICON_PATH)
@@ -1811,7 +1767,7 @@ class PiHardwareMonitor(Gtk.Window):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         header = Gtk.Label()
-        header.set_text("Pi 4 OS Hardware Monitor v1.5 5/6/2026")
+        header.set_text("Pi 4 OS Hardware Monitor v1.6 5/6/2026")
         apply_label_style(header, scale=1.35, bold=True)
         header.set_halign(Gtk.Align.START)
         subtitle = Gtk.Label(label="Raspberry Pi 4 desktop hardware monitor. No background service. Only the active tab refreshes.")
@@ -1866,7 +1822,7 @@ class PiHardwareMonitor(Gtk.Window):
 
         self.add_page("storage", "Storage", [[
             ("Boot / Device Info", "Root device, storage type, and hardware presence", [
-                "Boot Device", "Root Device", "NVMe Present", "Fan Present", "Bootloader Version", "Storage Devices",
+                "Boot Device", "Root Device", "NVMe Present", "Fan Telemetry", "Bootloader Version", "Storage Devices",
             ]),
             ("SD Card", "SD card presence and basic identity", [
                 "Present", "Device", "Capacity", "Card Used", "Vendor", "Model", "Serial", "Mounted At",
@@ -1977,19 +1933,26 @@ class PiHardwareMonitor(Gtk.Window):
         return False
 
     def get_thermal_rows(self):
-        rows = ["CPU Temp", "Power Chip Temp", "USB Drive Temp"]
-        fan_path, pwm_path = get_fan_hwmon_paths()
-        if fan_path is not None:
-            rows.append("Fan RPM")
-        if pwm_path is not None:
-            rows.append("Fan PWM Step")
-        return rows
+        # Pi 4 Cockpit thermal source of truth: CPU, PMIC/power-chip,
+        # and fan telemetry only when the telemetry is meaningful.
+        # USB drive temperature belongs under Storage, not Thermal / Cooling.
+        return ["CPU Temp", "Power Chip Temp", "Fan RPM", "Fan PWM Step"]
 
 
     def set_row(self, page_id, section, row, value):
         key = (page_id, section)
         if key in self.sections:
             self.sections[key].set_value(row, value)
+
+    def set_row_visible(self, page_id, section, row, visible):
+        key = (page_id, section)
+        if key in self.sections:
+            self.sections[key].set_row_visible(row, visible)
+
+    def update_fan_rows_visibility(self, page):
+        show_fan_rows = fan_telemetry_should_display()
+        self.set_row_visible(page, "Thermal / Cooling", "Fan RPM", show_fan_rows)
+        self.set_row_visible(page, "Thermal / Cooling", "Fan PWM Step", show_fan_rows)
 
     def refresh_active_page(self):
         if self.active_page == "overview":
@@ -2008,7 +1971,7 @@ class PiHardwareMonitor(Gtk.Window):
         page = "overview"
         self.set_row(page, "Thermal / Cooling", "CPU Temp", get_cpu_temp())
         self.set_row(page, "Thermal / Cooling", "Power Chip Temp", get_power_chip_temp())
-        self.set_row(page, "Thermal / Cooling", "USB Drive Temp", get_usb_drive_temp())
+        self.update_fan_rows_visibility(page)
         self.set_row(page, "Thermal / Cooling", "Fan RPM", get_fan_info())
         self.set_row(page, "Thermal / Cooling", "Fan PWM Step", get_fan_pwm_percent())
         self.set_row(page, "Power / Throttling", "Power Health", get_power_health())
@@ -2099,7 +2062,7 @@ class PiHardwareMonitor(Gtk.Window):
         self.set_row(page, "Boot / Device Info", "Boot Device", get_boot_device())
         self.set_row(page, "Boot / Device Info", "Root Device", get_root_device())
         self.set_row(page, "Boot / Device Info", "NVMe Present", get_nvme_drive_present())
-        self.set_row(page, "Boot / Device Info", "Fan Present", get_fan_present())
+        self.set_row(page, "Boot / Device Info", "Fan Telemetry", get_fan_telemetry_available())
         self.set_row(page, "Boot / Device Info", "Bootloader Version", get_bootloader_version())
         self.set_row(page, "Boot / Device Info", "Storage Devices", get_storage_summary())
 
