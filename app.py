@@ -1787,7 +1787,7 @@ class Section(Gtk.Frame):
 
 class PiHardwareMonitor(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Pi 4 OS Hardware Monitor v1.4")
+        super().__init__(title="Pi 4 OS Hardware Monitor v1.5")
         try:
             Gtk.Window.set_default_icon_name(APP_ICON_NAME)
             Gtk.Window.set_default_icon_from_file(APP_ICON_PATH)
@@ -1811,7 +1811,7 @@ class PiHardwareMonitor(Gtk.Window):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         header = Gtk.Label()
-        header.set_text("Pi 4 OS Hardware Monitor v1.4 5/6/2026")
+        header.set_text("Pi 4 OS Hardware Monitor v1.5 5/6/2026")
         apply_label_style(header, scale=1.35, bold=True)
         header.set_halign(Gtk.Align.START)
         subtitle = Gtk.Label(label="Raspberry Pi 4 desktop hardware monitor. No background service. Only the active tab refreshes.")
@@ -1847,22 +1847,26 @@ class PiHardwareMonitor(Gtk.Window):
         ]])
 
         self.add_page("power", "Power", [[
-            ("Power Supply", "Input voltage and negotiated power-supply status", [
-                "Input Voltage", "Negotiated Current Limit", "USB Current Limit Mode", "USB Over-current at Boot",
+            ("Power / Throttling", "Undervoltage, throttling, frequency cap, and temperature-limit status", [
+                "Power Health", "Current Undervoltage", "Undervoltage Since Boot",
+                "Current Throttled", "Throttled Since Boot", "Current Freq Cap",
+                "Freq Cap Since Boot", "Current Soft Temp Limit", "Soft Temp Since Boot", "Raw Status",
             ]),
+        ], [
             ("Voltages", "Pi firmware voltage readings", [
                 "Core Voltage", "SDRAM C", "SDRAM I", "SDRAM P",
             ]),
-        ], [
             ("Clocks", "Current firmware-reported clock speeds", [
                 "ARM Clock", "Core Clock", "eMMC Clock",
             ]),
-            ("Advanced Power", "Extra Pi-specific power diagnostics", self.get_advanced_power_rows()),
+            ("Advanced", "Firmware/version details and extra Pi-specific diagnostics", [
+                "Firmware Version", "Ring Oscillator",
+            ]),
         ]])
 
         self.add_page("storage", "Storage", [[
             ("Boot / Device Info", "Root device, storage type, and hardware presence", [
-                "Boot Device", "Root Device", "NVMe Present", "Fan Sensor", "Bootloader Version", "Storage Devices",
+                "Boot Device", "Root Device", "NVMe Present", "Fan Present", "Bootloader Version", "Storage Devices",
             ]),
             ("SD Card", "SD card presence and basic identity", [
                 "Present", "Device", "Capacity", "Card Used", "Vendor", "Model", "Serial", "Mounted At",
@@ -1981,14 +1985,6 @@ class PiHardwareMonitor(Gtk.Window):
             rows.append("Fan PWM Step")
         return rows
 
-    def get_advanced_power_rows(self):
-        rows = ["Power Chip Temp"]
-        _fan_path, pwm_path = get_fan_hwmon_paths()
-        if pwm_path is not None:
-            rows.append("Fan PWM Step")
-        rows.extend(["Ring Oscillator", "Raw Status"])
-        return rows
-
 
     def set_row(self, page_id, section, row, value):
         key = (page_id, section)
@@ -2075,10 +2071,16 @@ class PiHardwareMonitor(Gtk.Window):
 
     def update_power_page(self):
         page = "power"
-        self.set_row(page, "Power Supply", "Input Voltage", get_input_voltage())
-        self.set_row(page, "Power Supply", "Negotiated Current Limit", get_negotiated_current_limit())
-        self.set_row(page, "Power Supply", "USB Current Limit Mode", get_usb_current_limit_mode())
-        self.set_row(page, "Power Supply", "USB Over-current at Boot", get_usb_over_current_at_boot())
+        self.set_row(page, "Power / Throttling", "Power Health", get_power_health())
+        self.set_row(page, "Power / Throttling", "Current Undervoltage", get_current_undervoltage())
+        self.set_row(page, "Power / Throttling", "Undervoltage Since Boot", get_boot_undervoltage())
+        self.set_row(page, "Power / Throttling", "Current Throttled", get_current_throttled())
+        self.set_row(page, "Power / Throttling", "Throttled Since Boot", get_boot_throttled())
+        self.set_row(page, "Power / Throttling", "Current Freq Cap", get_current_freq_cap())
+        self.set_row(page, "Power / Throttling", "Freq Cap Since Boot", get_boot_freq_cap())
+        self.set_row(page, "Power / Throttling", "Current Soft Temp Limit", get_current_soft_temp_limit())
+        self.set_row(page, "Power / Throttling", "Soft Temp Since Boot", get_boot_soft_temp_limit())
+        self.set_row(page, "Power / Throttling", "Raw Status", self.get_throttled_raw_description())
 
         self.set_row(page, "Voltages", "Core Voltage", get_voltage("core"))
         self.set_row(page, "Voltages", "SDRAM C", get_voltage("sdram_c"))
@@ -2089,17 +2091,15 @@ class PiHardwareMonitor(Gtk.Window):
         self.set_row(page, "Clocks", "Core Clock", get_clock("core"))
         self.set_row(page, "Clocks", "eMMC Clock", get_clock("emmc"))
 
-        self.set_row(page, "Advanced Power", "Power Chip Temp", get_power_chip_temp())
-        self.set_row(page, "Advanced Power", "Fan PWM Step", get_fan_pwm_percent())
-        self.set_row(page, "Advanced Power", "Ring Oscillator", get_ring_oscillator())
-        self.set_row(page, "Advanced Power", "Raw Status", self.get_throttled_raw_description())
+        self.set_row(page, "Advanced", "Firmware Version", get_firmware_version())
+        self.set_row(page, "Advanced", "Ring Oscillator", get_ring_oscillator())
 
     def update_storage_page(self):
         page = "storage"
         self.set_row(page, "Boot / Device Info", "Boot Device", get_boot_device())
         self.set_row(page, "Boot / Device Info", "Root Device", get_root_device())
         self.set_row(page, "Boot / Device Info", "NVMe Present", get_nvme_drive_present())
-        self.set_row(page, "Boot / Device Info", "Fan Sensor", get_fan_present())
+        self.set_row(page, "Boot / Device Info", "Fan Present", get_fan_present())
         self.set_row(page, "Boot / Device Info", "Bootloader Version", get_bootloader_version())
         self.set_row(page, "Boot / Device Info", "Storage Devices", get_storage_summary())
 
