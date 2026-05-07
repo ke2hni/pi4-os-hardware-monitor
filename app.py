@@ -725,12 +725,11 @@ def get_cpu_scaling_frequency():
     return format_clock(hz)
 
 
-def get_root_udev_properties():
-    disk = get_root_disk_device()
-    if disk == NA:
+def get_udev_properties(device):
+    if not device or device == NA:
         return {}
 
-    output = run_command(["udevadm", "info", "--query=property", f"--name={disk}"], timeout=3)
+    output = run_command(["udevadm", "info", "--query=property", f"--name={device}"], timeout=3)
     if output == NA:
         return {}
 
@@ -742,6 +741,10 @@ def get_root_udev_properties():
         props[key.strip()] = value.strip()
 
     return props
+
+
+def get_root_udev_properties():
+    return get_udev_properties(get_root_disk_device())
 
 
 def get_root_smart_full():
@@ -768,26 +771,33 @@ def get_root_smart_full():
 
 
 def get_root_drive_manufacturer():
-    # Prefer drive-side SMART identity. For USB/SATA boot drives, udev USB
-    # vendor fields usually describe the enclosure/bridge, not the SSD/HDD.
+    # Only show a manufacturer/vendor when the drive reports one directly.
+    # Do not guess from the model number, and do not use USB enclosure/bridge
+    # vendor fields as the drive manufacturer.
     smart = get_root_smart_full()
-
     value = smart_line_value(smart, ["Model Family", "Vendor"])
+    return shorten(value, 34) if value != NA else NA
+
+
+def get_root_drive_firmware():
+    smart = get_root_smart_full()
+    value = smart_line_value(smart, ["Firmware Version", "Revision"])
     if value != NA:
         return shorten(value, 34)
 
-    model = smart_line_value(smart, ["Device Model", "Model Number", "Product"])
-    if model != NA:
-        first_word = model.strip().split()[0] if model.strip() else ""
-        return shorten(first_word, 34) if first_word else NA
+    props = get_root_udev_properties()
+    value = props.get("ID_REVISION")
+    return shorten(value.replace("_", " "), 34) if value else NA
+
+
+def get_root_usb_bridge_vendor():
+    disk = get_root_disk_device()
+    if disk == NA or "/dev/sd" not in disk:
+        return NA
 
     props = get_root_udev_properties()
-    for key in ["ID_ATA_VENDOR", "ID_VENDOR_FROM_DATABASE", "ID_VENDOR"]:
-        value = props.get(key)
-        if value:
-            return shorten(value.replace("_", " "), 34)
-
-    return NA
+    value = props.get("ID_USB_VENDOR") or props.get("ID_USB_VENDOR_FROM_DATABASE")
+    return shorten(value.replace("_", " "), 34) if value else NA
 
 
 def get_root_drive_model():
@@ -1496,6 +1506,15 @@ def get_usb_model():
     return shorten(parts[3], 34) if len(parts) >= 4 else NA
 
 
+def get_usb_bridge_vendor():
+    device = get_usb_device_path()
+    if device == NA:
+        return NA
+    props = get_udev_properties(device)
+    value = props.get("ID_USB_VENDOR") or props.get("ID_USB_VENDOR_FROM_DATABASE")
+    return shorten(value.replace("_", " "), 34) if value else NA
+
+
 def get_usb_capacity():
     lines = get_usb_disk_lines()
     if not lines:
@@ -1846,7 +1865,7 @@ class PiHardwareMonitor(Gtk.Window):
             self.set_wmclass(APP_ID, APP_NAME)
         except Exception:
             pass
-        self.set_default_size(1240, 725)
+        self.set_default_size(1240, 740)
         self.set_resizable(True)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_border_width(2)
@@ -1861,7 +1880,7 @@ class PiHardwareMonitor(Gtk.Window):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         header = Gtk.Label()
-        header.set_text("Pi 4 OS Hardware Monitor v2.1 5/7/2026")
+        header.set_text("Pi 4 OS Hardware Monitor v2.1 - May 7, 2026")
         apply_label_style(header, scale=1.35, bold=True)
         header.set_halign(Gtk.Align.START)
         subtitle = Gtk.Label(label="Raspberry Pi 4 desktop hardware monitor. No background service. Only the active tab refreshes.")
@@ -1917,15 +1936,16 @@ class PiHardwareMonitor(Gtk.Window):
         self.add_page("storage", "Storage", [[
             ("Boot / Device Info", "Root device, storage type, and hardware presence", [
                 "Boot Device", "Root Device", "Root Drive Manufacturer", "Root Drive Model",
-                "Root Drive SMART Health", "NVMe Present", "Fan Present", "Bootloader Version", "Storage Devices",
+                "Root Drive Firmware", "Root Drive SMART Health", "USB Bridge Vendor",
+                "NVMe Present", "Fan Present", "Bootloader Version", "Storage Devices",
             ]),
             ("SD Card", "SD card presence and basic identity", [
                 "Present", "Device", "Capacity", "Card Used", "Vendor", "Model", "Serial", "Mounted At",
             ]),
         ], [
             ("External USB Storage", "External USB storage when detected", [
-                "Model", "Capacity", "USB Drive Temp", "Drive Health", "Serial", "Firmware", "SATA Link",
-                "Free Space", "Device Path", "Mounted At",
+                "Model", "Capacity", "USB Bridge Vendor", "USB Drive Temp", "Drive Health",
+                "Serial", "Firmware", "SATA Link", "Free Space", "Device Path", "Mounted At",
             ]),
         ]])
 
@@ -2156,9 +2176,22 @@ class PiHardwareMonitor(Gtk.Window):
         page = "storage"
         self.set_row(page, "Boot / Device Info", "Boot Device", get_boot_device())
         self.set_row(page, "Boot / Device Info", "Root Device", get_root_device())
-        self.set_row(page, "Boot / Device Info", "Root Drive Manufacturer", get_root_drive_manufacturer())
-        self.set_row(page, "Boot / Device Info", "Root Drive Model", get_root_drive_model())
-        self.set_row(page, "Boot / Device Info", "Root Drive SMART Health", get_root_drive_smart_health())
+        root_manufacturer = get_root_drive_manufacturer()
+        root_model = get_root_drive_model()
+        root_firmware = get_root_drive_firmware()
+        root_smart_health = get_root_drive_smart_health()
+        root_usb_bridge_vendor = get_root_usb_bridge_vendor()
+
+        self.set_row(page, "Boot / Device Info", "Root Drive Manufacturer", root_manufacturer)
+        self.set_row_visible(page, "Boot / Device Info", "Root Drive Manufacturer", root_manufacturer != NA)
+        self.set_row(page, "Boot / Device Info", "Root Drive Model", root_model)
+        self.set_row_visible(page, "Boot / Device Info", "Root Drive Model", root_model != NA)
+        self.set_row(page, "Boot / Device Info", "Root Drive Firmware", root_firmware)
+        self.set_row_visible(page, "Boot / Device Info", "Root Drive Firmware", root_firmware != NA)
+        self.set_row(page, "Boot / Device Info", "Root Drive SMART Health", root_smart_health)
+        self.set_row_visible(page, "Boot / Device Info", "Root Drive SMART Health", root_smart_health != NA)
+        self.set_row(page, "Boot / Device Info", "USB Bridge Vendor", root_usb_bridge_vendor)
+        self.set_row_visible(page, "Boot / Device Info", "USB Bridge Vendor", root_usb_bridge_vendor != NA)
         self.set_row(page, "Boot / Device Info", "NVMe Present", get_nvme_drive_present())
         self.set_row(page, "Boot / Device Info", "Fan Present", get_fan_present())
         self.set_row(page, "Boot / Device Info", "Bootloader Version", get_bootloader_version())
@@ -2168,13 +2201,22 @@ class PiHardwareMonitor(Gtk.Window):
         self.set_row(page, "SD Card", "Device", get_sd_device() or NA)
         self.set_row(page, "SD Card", "Capacity", get_sd_capacity())
         self.set_row(page, "SD Card", "Card Used", get_sd_used())
-        self.set_row(page, "SD Card", "Vendor", get_sd_vendor())
-        self.set_row(page, "SD Card", "Model", get_sd_model())
-        self.set_row(page, "SD Card", "Serial", get_sd_serial())
+        sd_vendor = get_sd_vendor()
+        sd_model = get_sd_model()
+        sd_serial = get_sd_serial()
+        self.set_row(page, "SD Card", "Vendor", sd_vendor)
+        self.set_row_visible(page, "SD Card", "Vendor", sd_vendor != NA)
+        self.set_row(page, "SD Card", "Model", sd_model)
+        self.set_row_visible(page, "SD Card", "Model", sd_model != NA)
+        self.set_row(page, "SD Card", "Serial", sd_serial)
+        self.set_row_visible(page, "SD Card", "Serial", sd_serial != NA)
         self.set_row(page, "SD Card", "Mounted At", get_sd_mountpoint())
 
+        usb_bridge_vendor = get_usb_bridge_vendor()
         self.set_row(page, "External USB Storage", "Model", get_usb_model())
         self.set_row(page, "External USB Storage", "Capacity", get_usb_capacity())
+        self.set_row(page, "External USB Storage", "USB Bridge Vendor", usb_bridge_vendor)
+        self.set_row_visible(page, "External USB Storage", "USB Bridge Vendor", usb_bridge_vendor != NA)
         self.set_row(page, "External USB Storage", "USB Drive Temp", get_usb_drive_temp())
         self.set_row(page, "External USB Storage", "Drive Health", get_usb_drive_health())
         self.set_row(page, "External USB Storage", "Serial", get_usb_serial())
