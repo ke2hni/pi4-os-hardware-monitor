@@ -451,6 +451,14 @@ def get_firmware_version():
     return lines[0]
 
 
+def get_bootloader_version():
+    output = run_command(["vcgencmd", "bootloader_version"], timeout=2)
+    if output == NA:
+        return output
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return lines[0] if lines else NA
+
+
 def find_hwmon_temp_by_name(possible_names):
     hwmon_root = "/sys/class/hwmon"
     try:
@@ -487,64 +495,77 @@ def get_power_chip_temp():
     return find_hwmon_temp_by_name(["rpi_volt", "pmic"])
 
 
-def get_fan_hwmon_path():
+def get_fan_hwmon_paths():
+    # Match the Pi 4 Cockpit monitor behavior: fan support is sensor-reported
+    # only when Linux exposes fan*_input and/or pwm[0-9]* through hwmon.
     hwmon_root = "/sys/class/hwmon"
+    fan_path = None
+    pwm_path = None
+
     try:
         for hwmon in sorted(os.listdir(hwmon_root)):
             hwmon_path = os.path.join(hwmon_root, hwmon)
-            fan_files = sorted(
-                file_name
-                for file_name in os.listdir(hwmon_path)
-                if file_name.startswith("fan") and file_name.endswith("_input")
-            )
-            if fan_files:
-                return hwmon_path, fan_files[0]
+            if not os.path.isdir(hwmon_path):
+                continue
+
+            if fan_path is None:
+                for file_name in sorted(os.listdir(hwmon_path)):
+                    if file_name.startswith("fan") and file_name.endswith("_input"):
+                        candidate = os.path.join(hwmon_path, file_name)
+                        if os.access(candidate, os.R_OK):
+                            fan_path = candidate
+                            break
+
+            if pwm_path is None:
+                for file_name in sorted(os.listdir(hwmon_path)):
+                    if re.fullmatch(r"pwm\d+", file_name):
+                        candidate = os.path.join(hwmon_path, file_name)
+                        if os.access(candidate, os.R_OK):
+                            pwm_path = candidate
+                            break
+
+            if fan_path is not None and pwm_path is not None:
+                break
     except Exception:
         pass
-    return None, None
+
+    return fan_path, pwm_path
+
+
+def fan_sensor_present():
+    fan_path, pwm_path = get_fan_hwmon_paths()
+    return fan_path is not None or pwm_path is not None
 
 
 def get_fan_rpm_value():
-    hwmon_path, fan_file = get_fan_hwmon_path()
-    if not hwmon_path or not fan_file:
+    fan_path, _pwm_path = get_fan_hwmon_paths()
+    if not fan_path:
         return None
-    value = read_file(os.path.join(hwmon_path, fan_file))
+    value = read_file(fan_path)
     try:
         return int(value)
     except Exception:
         return None
 
 
-def get_power_level():
-    # Fan power level comes from the fan PWM value, not CPU/core voltage.
-    rpm = get_fan_rpm_value()
-    if rpm is None:
-        return NA
-    if rpm == 0:
-        return "0% Idle"
-
-    hwmon_path, _fan_file = get_fan_hwmon_path()
-    if not hwmon_path:
-        return NA
-
+def get_fan_pwm_value():
+    _fan_path, pwm_path = get_fan_hwmon_paths()
+    if not pwm_path:
+        return None
+    value = read_file(pwm_path)
     try:
-        pwm_files = sorted(
-            file_name
-            for file_name in os.listdir(hwmon_path)
-            if re.fullmatch(r"pwm\d+", file_name)
-        )
-        for pwm_file in pwm_files:
-            value = read_file(os.path.join(hwmon_path, pwm_file))
-            try:
-                pwm_value = int(value)
-            except Exception:
-                continue
-            percent = max(0, min(100, round((pwm_value / 255) * 100)))
-            return f"{percent}%"
+        return int(value)
     except Exception:
-        pass
+        return None
 
-    return NA
+
+def get_fan_pwm_percent():
+    pwm_value = get_fan_pwm_value()
+    if pwm_value is None:
+        return NA
+    percent = max(0, min(100, round((pwm_value / 255) * 100)))
+    return f"{percent}%"
+
 
 def get_fan_info():
     rpm = get_fan_rpm_value()
@@ -555,36 +576,8 @@ def get_fan_info():
     return f"{rpm} RPM"
 
 
-def fan_telemetry_available():
-    return get_fan_rpm_value() is not None or get_power_level() != NA
-
-
-def fan_overlay_configured():
-    config_paths = [
-        "/boot/firmware/config.txt",
-        "/boot/config.txt",
-        "/boot/firmware/usercfg.txt",
-        "/boot/usercfg.txt",
-    ]
-    for path in config_paths:
-        text = read_file(path)
-        if text == NA:
-            continue
-        for line in text.splitlines():
-            cleaned = line.strip().lower()
-            if not cleaned or cleaned.startswith("#"):
-                continue
-            if "gpio-fan" in cleaned or "rpi-poe" in cleaned or "pwm-fan" in cleaned:
-                return True
-    return False
-
-
 def get_fan_present():
-    if fan_telemetry_available():
-        return "Yes"
-    if fan_overlay_configured():
-        return "Configured / No RPM Sensor"
-    return "Not Sensor-Reported"
+    return "Yes" if fan_sensor_present() else "No"
 
 def get_throttled_raw():
     output = run_command(["vcgencmd", "get_throttled"])
@@ -1480,7 +1473,7 @@ def get_usb_mounts():
     if device == NA:
         return []
 
-    disk_name = os.path.basename(device)
+    base = os.path.basename(device)
     output = run_command(["findmnt", "-rn", "-o", "SOURCE,TARGET,FSTYPE,SIZE,USED,AVAIL,USE%"], timeout=3)
     if output == NA:
         return []
@@ -1492,8 +1485,7 @@ def get_usb_mounts():
             continue
 
         source, target, fstype, size, used, avail, use_percent = parts
-        source_base = os.path.basename(source)
-        if source_base != disk_name and not source_base.startswith(disk_name):
+        if source != device and not source.startswith(f"/dev/{base}"):
             continue
 
         mounts.append({
@@ -1526,16 +1518,12 @@ def get_preferred_usb_mount():
 
 
 def get_usb_mountpoint():
-    device = get_usb_device_path()
-    if device == NA:
-        return NA
-
     mounts = get_usb_mounts()
     if not mounts:
-        return "Not Mounted"
+        return "Not Mounted" if get_usb_device_path() != NA else NA
 
-    root_first = sorted(mounts, key=lambda item: 0 if item["target"] == "/" else 1)
-    return ", ".join(mount["target"] for mount in root_first)
+    targets = [mount["target"] for mount in mounts if mount.get("target")]
+    return ", ".join(targets) if targets else "Not Mounted"
 
 
 def get_usb_free_space():
@@ -1799,7 +1787,7 @@ class Section(Gtk.Frame):
 
 class PiHardwareMonitor(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Pi 4 OS Hardware Monitor v1.2")
+        super().__init__(title="Pi 4 OS Hardware Monitor v1.4")
         try:
             Gtk.Window.set_default_icon_name(APP_ICON_NAME)
             Gtk.Window.set_default_icon_from_file(APP_ICON_PATH)
@@ -1823,7 +1811,7 @@ class PiHardwareMonitor(Gtk.Window):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         header = Gtk.Label()
-        header.set_text("Pi 4 OS Hardware Monitor v1.2 5/6/2026")
+        header.set_text("Pi 4 OS Hardware Monitor v1.4 5/6/2026")
         apply_label_style(header, scale=1.35, bold=True)
         header.set_halign(Gtk.Align.START)
         subtitle = Gtk.Label(label="Raspberry Pi 4 desktop hardware monitor. No background service. Only the active tab refreshes.")
@@ -1842,7 +1830,7 @@ class PiHardwareMonitor(Gtk.Window):
         self.notebook.connect("switch-page", self.on_tab_switched)
 
         self.add_page("overview", "Overview", [[
-            ("Thermal / Cooling", "Core temperature and drive temperature", self.get_thermal_rows()),
+            ("Thermal / Cooling", "Core temperature and fan telemetry", self.get_thermal_rows()),
             ("Power / Throttling", "Power, throttling, frequency cap, and temperature-limit status", [
                 "Power Health", "Current Undervoltage", "Undervoltage Since Boot",
                 "Current Throttled", "Throttled Since Boot", "Current Freq Cap",
@@ -1869,14 +1857,12 @@ class PiHardwareMonitor(Gtk.Window):
             ("Clocks", "Current firmware-reported clock speeds", [
                 "ARM Clock", "Core Clock", "eMMC Clock",
             ]),
-            ("Advanced Power", "Extra Pi-specific power diagnostics", [
-                "Power Chip Temp", "Core Rail Power", "Ring Oscillator", "Raw Status",
-            ]),
+            ("Advanced Power", "Extra Pi-specific power diagnostics", self.get_advanced_power_rows()),
         ]])
 
         self.add_page("storage", "Storage", [[
             ("Boot / Device Info", "Root device, storage type, and hardware presence", [
-                "Boot Device", "Root Device", "NVMe Present", "Fan Present", "Storage Devices",
+                "Boot Device", "Root Device", "NVMe Present", "Fan Sensor", "Bootloader Version", "Storage Devices",
             ]),
             ("SD Card", "SD card presence and basic identity", [
                 "Present", "Device", "Capacity", "Card Used", "Vendor", "Model", "Serial", "Mounted At",
@@ -1987,7 +1973,21 @@ class PiHardwareMonitor(Gtk.Window):
         return False
 
     def get_thermal_rows(self):
-        return ["CPU Temp", "Power Chip Temp", "USB Drive Temp"]
+        rows = ["CPU Temp", "Power Chip Temp", "USB Drive Temp"]
+        fan_path, pwm_path = get_fan_hwmon_paths()
+        if fan_path is not None:
+            rows.append("Fan RPM")
+        if pwm_path is not None:
+            rows.append("Fan PWM Step")
+        return rows
+
+    def get_advanced_power_rows(self):
+        rows = ["Power Chip Temp"]
+        _fan_path, pwm_path = get_fan_hwmon_paths()
+        if pwm_path is not None:
+            rows.append("Fan PWM Step")
+        rows.extend(["Ring Oscillator", "Raw Status"])
+        return rows
 
 
     def set_row(self, page_id, section, row, value):
@@ -2013,6 +2013,8 @@ class PiHardwareMonitor(Gtk.Window):
         self.set_row(page, "Thermal / Cooling", "CPU Temp", get_cpu_temp())
         self.set_row(page, "Thermal / Cooling", "Power Chip Temp", get_power_chip_temp())
         self.set_row(page, "Thermal / Cooling", "USB Drive Temp", get_usb_drive_temp())
+        self.set_row(page, "Thermal / Cooling", "Fan RPM", get_fan_info())
+        self.set_row(page, "Thermal / Cooling", "Fan PWM Step", get_fan_pwm_percent())
         self.set_row(page, "Power / Throttling", "Power Health", get_power_health())
         self.set_row(page, "Power / Throttling", "Current Undervoltage", get_current_undervoltage())
         self.set_row(page, "Power / Throttling", "Undervoltage Since Boot", get_boot_undervoltage())
@@ -2088,7 +2090,7 @@ class PiHardwareMonitor(Gtk.Window):
         self.set_row(page, "Clocks", "eMMC Clock", get_clock("emmc"))
 
         self.set_row(page, "Advanced Power", "Power Chip Temp", get_power_chip_temp())
-        self.set_row(page, "Advanced Power", "Core Rail Power", get_core_rail_power())
+        self.set_row(page, "Advanced Power", "Fan PWM Step", get_fan_pwm_percent())
         self.set_row(page, "Advanced Power", "Ring Oscillator", get_ring_oscillator())
         self.set_row(page, "Advanced Power", "Raw Status", self.get_throttled_raw_description())
 
@@ -2097,7 +2099,8 @@ class PiHardwareMonitor(Gtk.Window):
         self.set_row(page, "Boot / Device Info", "Boot Device", get_boot_device())
         self.set_row(page, "Boot / Device Info", "Root Device", get_root_device())
         self.set_row(page, "Boot / Device Info", "NVMe Present", get_nvme_drive_present())
-        self.set_row(page, "Boot / Device Info", "Fan Present", get_fan_present())
+        self.set_row(page, "Boot / Device Info", "Fan Sensor", get_fan_present())
+        self.set_row(page, "Boot / Device Info", "Bootloader Version", get_bootloader_version())
         self.set_row(page, "Boot / Device Info", "Storage Devices", get_storage_summary())
 
         self.set_row(page, "SD Card", "Present", get_sd_present())
