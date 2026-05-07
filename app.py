@@ -556,7 +556,7 @@ def get_fan_pwm_value():
 
 def get_fan_pwm_percent():
     pwm_value = get_fan_pwm_value()
-    if pwm_value is None:
+    if pwm_value is None or pwm_value <= 0:
         return NA
     percent = max(0, min(100, round((pwm_value / 255) * 100)))
     return f"{percent}%"
@@ -564,10 +564,8 @@ def get_fan_pwm_percent():
 
 def get_fan_info():
     rpm = get_fan_rpm_value()
-    if rpm is None:
+    if rpm is None or rpm <= 0:
         return NA
-    if rpm == 0:
-        return "0 RPM Idle"
     return f"{rpm} RPM"
 
 
@@ -618,13 +616,14 @@ def gpio_fan_configured():
 
 
 def get_fan_present():
+    # Fan Present means Linux sees/configures the GPIO fan device. It does not
+    # require RPM/PWM telemetry to be actively reporting non-zero values.
     return "Yes" if fan_sensor_present() or gpio_fan_configured() else "No"
 
 
 def fan_telemetry_should_display():
-    # Match the Pi 4 Cockpit UI behavior: only show fan telemetry rows when
-    # Linux exposes a useful fan RPM or PWM value. Physical/configured fan
-    # presence is reported separately as Fan Present.
+    # Only show fan telemetry rows when the sensor reports useful non-zero
+    # RPM/PWM data. GPIO fan presence is reported separately as Fan Present.
     rpm = get_fan_rpm_value()
     pwm = get_fan_pwm_value()
 
@@ -1794,7 +1793,7 @@ class PiHardwareMonitor(Gtk.Window):
             self.set_wmclass(APP_ID, APP_NAME)
         except Exception:
             pass
-        self.set_default_size(1240, 680)
+        self.set_default_size(1240, 675)
         self.set_resizable(True)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_border_width(2)
