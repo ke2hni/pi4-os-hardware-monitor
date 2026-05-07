@@ -179,28 +179,6 @@ def read_binary(path):
         return None
 
 
-def read_dt_uint32(path):
-    data = read_binary(path)
-    if not data:
-        return None
-    try:
-        return int.from_bytes(data[-4:], "big")
-    except Exception:
-        return None
-
-
-def read_dt_bool(path):
-    data = read_binary(path)
-    if data is None:
-        return None
-    if len(data) == 0:
-        return True
-    try:
-        return int.from_bytes(data[-4:], "big") != 0
-    except Exception:
-        return None
-
-
 def yes_no(value):
     return "Yes" if value else "No"
 
@@ -234,24 +212,6 @@ def parse_first_float(text):
         return float(match.group(0))
     except Exception:
         return None
-
-
-def parse_vcgencmd_adc_value(line):
-    match = re.search(r"=\s*([-+]?\d+(?:\.\d+)?)(?:V|A)?", line)
-    if match:
-        try:
-            return float(match.group(1))
-        except Exception:
-            return None
-
-    match = re.search(r"volt\(([-+]?\d+(?:\.\d+)?)V\)", line)
-    if match:
-        try:
-            return float(match.group(1))
-        except Exception:
-            return None
-
-    return None
 
 
 def get_cpu_temp():
@@ -644,11 +604,6 @@ def get_throttled_raw():
         return None
 
 
-def get_throttled_raw_text():
-    raw = get_throttled_raw()
-    return NA if raw is None else f"{raw:#x}"
-
-
 def bit_status(bit_now, bit_past):
     raw = get_throttled_raw()
     if raw is None:
@@ -672,13 +627,6 @@ def get_power_health():
     if raw & ((1 << 3) | (1 << 19)):
         issues.append("Temperature limit")
     return "Needs attention\n" + ", ".join(issues)
-
-
-def get_throttled_status():
-    raw = get_throttled_raw()
-    if raw is None:
-        return NA
-    return "No throttling detected" if raw == 0 else get_power_health()
 
 
 def get_current_undervoltage():
@@ -728,33 +676,12 @@ def get_storage_summary():
     return "\n".join(devices) if devices else NA
 
 
-def get_root_usage():
-    output = run_command(["df", "-h", "/"])
-    try:
-        parts = output.splitlines()[1].split()
-        return f"{parts[2]} / {parts[1]} ({parts[4]})"
-    except Exception:
-        return NA
-
-
 def get_root_percent():
     output = run_command(["df", "-h", "/"])
     try:
         return output.splitlines()[1].split()[4]
     except Exception:
         return NA
-
-
-def get_boot_usage():
-    for path in ["/boot/firmware", "/boot"]:
-        if os.path.ismount(path):
-            output = run_command(["df", "-h", path])
-            try:
-                parts = output.splitlines()[1].split()
-                return f"{parts[2]} / {parts[1]} ({parts[4]})"
-            except Exception:
-                continue
-    return NA
 
 
 def get_root_device():
@@ -1784,7 +1711,7 @@ class Section(Gtk.Frame):
 
 class PiHardwareMonitor(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Pi 4 OS Hardware Monitor v1.7")
+        super().__init__(title="Pi 4 OS Hardware Monitor v1.9")
         try:
             Gtk.Window.set_default_icon_name(APP_ICON_NAME)
             Gtk.Window.set_default_icon_from_file(APP_ICON_PATH)
@@ -1808,7 +1735,7 @@ class PiHardwareMonitor(Gtk.Window):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         header = Gtk.Label()
-        header.set_text("Pi 4 OS Hardware Monitor v1.7 5/6/2026")
+        header.set_text("Pi 4 OS Hardware Monitor v1.9 5/6/2026")
         apply_label_style(header, scale=1.35, bold=True)
         header.set_halign(Gtk.Align.START)
         subtitle = Gtk.Label(label="Raspberry Pi 4 desktop hardware monitor. No background service. Only the active tab refreshes.")
