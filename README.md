@@ -182,8 +182,8 @@ MIT License
 
 If this project helped you, star the GitHub repo.
 
-## Third-party artwork
+## Historical third-party artwork
 
-`raspberry_pi_icon_130847.png` is the “Raspberry pi” icon by Terence Eden, obtained from [Icon-Icons](https://icon-icons.com/icon/raspberry-pi/130847) and licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+Earlier revisions included the “Raspberry pi” icon by Terence Eden, obtained from [Icon-Icons](https://icon-icons.com/icon/raspberry-pi/130847) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The unused icon has been removed from the current release.
 
-The third-party icon is not covered by this repository’s MIT License. Raspberry Pi is a trademark of Raspberry Pi Ltd.
+Raspberry Pi is a trademark of Raspberry Pi Ltd.
